@@ -76,8 +76,18 @@ class MainActivity : Activity() {
         }
         root.addView(chat)
 
+        val demo = makeButton("演示她的 15 种动作 ✨") {
+            val started = PetAnimator.playDemoSequence()
+            Toast.makeText(
+                this,
+                if (started) "动作演示开始啦！看看她的表情变化～" else "请先开启桌面宠物，再播放动作演示。",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+        root.addView(demo)
+
         val note = TextView(this).apply {
-            text = "使用说明\n1. 首次开启时，请允许“显示在其他应用上层”。\n2. 桌宠出现后，可以拖动它；点击它即可打开聊天。\n3. 免费本地模式不调用网络。独立 AI 模式需要自行配置 API。\n\n提示：部分手机需要在系统设置中允许后台运行或关闭电池优化，才能更稳定地保留悬浮宠物。"
+            text = "使用说明\n1. 首次开启时，请允许“显示在其他应用上层”。\n2. 单击她会有表情反应；双击打开聊天；长按进入休息/唤醒；拖动可以移动位置。\n3. 点击“演示她的 15 种动作”可播放动作图鉴。\n4. 在聊天中试试输入“害羞”“跳一下”“吃东西”“喝水”“走两步”“晚安”等词，她会做出对应动作。\n5. 免费本地模式不调用网络；独立 AI 模式需要自行配置 API。\n\n提示：部分手机需要在系统设置中允许后台运行或关闭电池优化，才能更稳定地保留悬浮宠物。"
             textSize = 14f
             setTextColor(Color.rgb(99, 89, 108))
             setPadding(0, dp(24), 0, 0)

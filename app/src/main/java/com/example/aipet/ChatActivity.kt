@@ -39,6 +39,7 @@ class ChatActivity : Activity() {
         super.onCreate(savedInstanceState)
         buildScreen()
         addMessage("小伙伴", "嗨！我住在你的手机桌面上。你可以拖动我，也可以在这里跟我说说话。现在是免费本地模式，不会把聊天发送到网络。", false)
+        PetAnimator.react(PetMood.HAPPY, "你来啦～", 1300L)
     }
 
     override fun onResume() {
@@ -110,7 +111,6 @@ class ChatActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(2), dp(2), dp(2), dp(10))
         }
-        
         scrollView.addView(messageColumn, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -119,7 +119,7 @@ class ChatActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         input = EditText(this).apply {
-            hint = "和小伙伴说点什么…"
+            hint = "试试说：害羞、跳一下、吃东西、晚安…"
             textSize = 15f
             minHeight = dp(48)
             maxLines = 4
@@ -177,8 +177,11 @@ class ChatActivity : Activity() {
         if (text.isEmpty()) return
         input.setText("")
         addMessage("你", text, true)
+        PetAnimator.reactToText(text)
         if (mode == Mode.LOCAL) {
-            addMessage("小伙伴", localReply(text), false)
+            val reply = localReply(text)
+            addMessage("小伙伴", reply, false)
+            PetAnimator.reactToText(reply, isReply = true)
         } else {
             sendToApi(text)
         }
@@ -211,6 +214,7 @@ class ChatActivity : Activity() {
 
         history.add(JSONObject().put("role", "user").put("content", userText))
         addMessage("小伙伴", "正在思考…", false)
+        PetAnimator.react(PetMood.THINKING, "让我想想…", 2200L)
         val systemPrompt = JSONObject()
             .put("role", "system")
             .put("content", "你是一个温柔、自然、不过度打扰用户的二次元桌面宠物。请用简体中文回复，语气友善、简洁。不要声称自己有真实情感或能在后台主动观察用户。")
@@ -249,7 +253,10 @@ class ChatActivity : Activity() {
             } catch (e: Exception) {
                 reply = "连接失败：${e.localizedMessage ?: "请检查网络与接口配置"}"
             }
-            runOnUiThread { addMessage("小伙伴", reply, false) }
+            runOnUiThread {
+                addMessage("小伙伴", reply, false)
+                PetAnimator.reactToText(reply, isReply = true)
+            }
         }
     }
 

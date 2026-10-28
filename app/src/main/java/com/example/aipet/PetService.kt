@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -26,6 +27,8 @@ class PetService : Service() {
     private var touchX = 0f
     private var touchY = 0f
     private var dragging = false
+    private var downAt = 0L
+    private var lastTapAt = 0L
     private val touchSlop by lazy { (8 * resources.displayMetrics.density).toInt() }
 
     override fun onCreate() {
@@ -57,8 +60,8 @@ class PetService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
         val params = WindowManager.LayoutParams(
-            dp(128),
-            dp(164),
+            dp(148),
+            dp(194),
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -75,13 +78,17 @@ class PetService : Service() {
                     initialY = params.y
                     touchX = event.rawX
                     touchY = event.rawY
+                    downAt = SystemClock.uptimeMillis()
                     dragging = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - touchX).toInt()
                     val dy = (event.rawY - touchY).toInt()
-                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) dragging = true
+                    if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        dragging = true
+                        PetAnimator.react(PetMood.WALK, "", 900L)
+                    }
                     if (dragging) {
                         params.x = initialX + dx
                         params.y = initialY + dy
@@ -91,8 +98,28 @@ class PetService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
-                        v.performClick()
-                        openChat()
+                        val now = SystemClock.uptimeMillis()
+                        val heldMs = now - downAt
+                        when {
+                            heldMs >= 650L -> {
+                                val sleeping = PetAnimator.toggleSleep()
+                                Toast.makeText(
+                                    this,
+                                    if (sleeping == true) "小伙伴进入休息模式啦，轻点或长按可以唤醒" else "小伙伴醒来啦！",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                lastTapAt = 0L
+                            }
+                            lastTapAt > 0L && now - lastTapAt <= 360L -> {
+                                lastTapAt = 0L
+                                PetAnimator.react(PetMood.HAPPY, "来聊天吧～", 1400L)
+                                openChat()
+                            }
+                            else -> {
+                                lastTapAt = now
+                                v.performClick()
+                            }
+                        }
                     }
                     true
                 }

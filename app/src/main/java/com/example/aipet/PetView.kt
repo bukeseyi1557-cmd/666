@@ -1,162 +1,275 @@
 package com.example.aipet
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.View
+import java.lang.ref.WeakReference
+import kotlin.math.min
 import kotlin.math.sin
+import kotlin.random.Random
 
-/** A tiny anime-style character drawn entirely with Canvas; no image assets required. */
+enum class PetMood(val frameIndex: Int) {
+    IDLE(0), BLINK(1), HAPPY(2), SHY(3), SURPRISED(4), ANGRY(5), EMBARRASSED(6),
+    SLEEP(7), EAT(8), DRINK(9), WALK(10), RUN(11), JUMP(12), SIT(13), LIE(14),
+    THINKING(0), SAD(6)
+}
+
+/** A tiny bridge so chat and the floating service can share the pet's current reaction. */
+object PetAnimator {
+    private var activeView: WeakReference<PetView>? = null
+
+    internal fun attach(view: PetView) {
+        activeView = WeakReference(view)
+    }
+
+    internal fun detach(view: PetView) {
+        if (activeView?.get() === view) activeView = null
+    }
+
+    fun react(mood: PetMood, bubble: String = "", durationMs: Long = 1800L) {
+        activeView?.get()?.showMood(mood, bubble, durationMs)
+    }
+
+    fun reactToTap() {
+        activeView?.get()?.reactToTap()
+    }
+
+    fun toggleSleep(): Boolean? = activeView?.get()?.toggleSleep()
+
+    fun playDemoSequence(): Boolean = activeView?.get()?.playDemoSequence() ?: false
+
+    fun reactToText(text: String, isReply: Boolean = false) {
+        val s = text.lowercase()
+        val reaction = when {
+            listOf("晚安", "睡觉", "睡了", "困了", "好困").any { s.contains(it) } -> PetMood.SLEEP to "那就休息一下吧～"
+            listOf("走两步", "走路", "散步").any { s.contains(it) } -> PetMood.WALK to "哒哒哒～"
+            listOf("跑步", "跑起来", "冲呀").any { s.contains(it) } -> PetMood.RUN to "冲呀！"
+            listOf("跳一下", "跳舞", "蹦蹦跳跳").any { s.contains(it) } -> PetMood.JUMP to "看我的！"
+            listOf("坐下", "坐一会", "坐好").any { s.contains(it) } -> PetMood.SIT to "乖乖坐好～"
+            listOf("躺下", "躺一会", "趴下").any { s.contains(it) } -> PetMood.LIE to "躺平一下～"
+            listOf("生气", "气死", "烦死", "讨厌").any { s.contains(it) } -> PetMood.ANGRY to "哼！我听着呢。"
+            listOf("害羞", "夸我", "可爱", "喜欢你").any { s.contains(it) } -> PetMood.SHY to "才、才没有脸红呢！"
+            listOf("惊讶", "吓一跳", "真的假的").any { s.contains(it) } -> PetMood.SURPRISED to "欸？！真的嘛？"
+            listOf("难过", "伤心", "孤独", "委屈", "不开心", "压力").any { s.contains(it) } -> PetMood.SAD to "我在这里陪你。"
+            listOf("开心", "高兴", "成功", "好消息", "谢谢").any { s.contains(it) } -> PetMood.HAPPY to "耶！真好～"
+            listOf("吃饭", "吃东西", "饿了", "零食").any { s.contains(it) } -> PetMood.EAT to "一起补充能量！"
+            listOf("喝水", "喝饮料", "奶茶").any { s.contains(it) } -> PetMood.DRINK to "咕噜咕噜～"
+            isReply -> PetMood.HAPPY to "嗯嗯，我在听～"
+            else -> PetMood.THINKING to "让我想想…"
+        }
+        react(reaction.first, reaction.second, if (reaction.first == PetMood.SLEEP) 2600L else 1900L)
+    }
+}
+
+/** Animated anime-style floating companion. The 5x3 sprite atlas is bundled locally. */
 class PetView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var frame = 0
+    private val atlas: Bitmap? = BitmapFactory.decodeResource(resources, R.drawable.pet_atlas)
+    private val spritePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 255, 255) }
+    private val bubbleBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(202, 219, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = dp(1.2f)
+    }
+    private val bubbleTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(62, 68, 105)
+        textSize = dp(11.5f)
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+    }
+    private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(34, 55, 52, 83) }
+    private var frameCount = 0
+    private var mood = PetMood.IDLE
+    private var moodUntil = 0L
+    private var bubbleText = ""
+    private var bubbleUntil = 0L
+    private var sleeping = false
+    private var nextIdleActionAt = SystemClock.uptimeMillis() + 2800L
+    private val demoHandler = Handler(Looper.getMainLooper())
+    private val demoActions = listOf(
+        PetMood.BLINK to "眨眨眼～", PetMood.HAPPY to "开心！", PetMood.SHY to "有点害羞…",
+        PetMood.SURPRISED to "欸？！", PetMood.ANGRY to "哼！", PetMood.EMBARRASSED to "抱抱…",
+        PetMood.THINKING to "让我想想…", PetMood.EAT to "吃点东西～", PetMood.DRINK to "喝口水～",
+        PetMood.WALK to "散步时间", PetMood.RUN to "冲呀！", PetMood.JUMP to "跳一下！",
+        PetMood.SIT to "坐下休息", PetMood.LIE to "躺平一下", PetMood.SLEEP to "晚安～"
+    )
+    private var demoIndex = 0
+    private var demoRunning = false
+    private val demoRunnable = object : Runnable {
+        override fun run() {
+            if (!demoRunning) return
+            if (demoIndex >= demoActions.size) {
+                demoRunning = false
+                showMood(PetMood.IDLE, "演示完成～", 1500L)
+                return
+            }
+            val (demoMood, text) = demoActions[demoIndex++]
+            showMood(demoMood, text, 900L)
+            demoHandler.postDelayed(this, 1050L)
+        }
+    }
 
     init {
-        contentDescription = "小伙伴桌宠，点击聊天，拖动移动"
+        contentDescription = "二次元小伙伴桌宠：单击互动，双击聊天，长按休息或唤醒，拖动移动"
         isClickable = true
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        PetAnimator.attach(this)
+        postInvalidateDelayed(120L)
+    }
+
+    override fun onDetachedFromWindow() {
+        demoRunning = false
+        demoHandler.removeCallbacks(demoRunnable)
+        PetAnimator.detach(this)
+        super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val sx = width / 160f
-        val sy = height / 190f
-        canvas.save()
-        canvas.scale(sx, sy)
-        frame++
-        val bob = (sin(frame / 12.0) * 2.0).toFloat()
-        canvas.translate(0f, bob)
-        drawCharacter(canvas)
-        canvas.restore()
-        postInvalidateDelayed(90)
+        frameCount++
+        val now = SystemClock.uptimeMillis()
+        updateMood(now)
+
+        val size = min(width - dp(6f), height - dp(42f)).coerceAtLeast(dp(64f))
+        val left = (width - size) / 2f
+        val top = height - size - dp(15f)
+        val bob = if (!sleeping && mood in listOf(PetMood.IDLE, PetMood.BLINK, PetMood.HAPPY, PetMood.SHY)) {
+            (sin(frameCount / 8.0) * dp(1.5f)).toFloat()
+        } else 0f
+
+        canvas.drawOval(
+            RectF(width * 0.25f, height - dp(15f), width * 0.75f, height - dp(5f)),
+            shadowPaint
+        )
+        val activeMood = if (sleeping) PetMood.SLEEP else mood
+        drawSprite(canvas, activeMood.frameIndex, RectF(left, top + bob, left + size, top + size + bob))
+        if (bubbleText.isNotBlank() && now < bubbleUntil) drawBubble(canvas, bubbleText)
+        postInvalidateDelayed(120L)
     }
 
-    private fun drawCharacter(c: Canvas) {
-        // soft ground shadow
-        fill(Color.argb(45, 72, 52, 85))
-        c.drawOval(RectF(43f, 176f, 117f, 188f), paint)
+    private fun updateMood(now: Long) {
+        if (!sleeping && mood != PetMood.IDLE && moodUntil > 0L && now >= moodUntil) {
+            mood = PetMood.IDLE
+            moodUntil = 0L
+        }
+        if (now >= bubbleUntil) bubbleText = ""
+        if (!sleeping && mood == PetMood.IDLE && now >= nextIdleActionAt) {
+            val choice = listOf(PetMood.BLINK, PetMood.BLINK, PetMood.THINKING, PetMood.HAPPY).random()
+            mood = choice
+            moodUntil = now + when (choice) {
+                PetMood.BLINK -> 420L
+                PetMood.THINKING -> 1250L
+                else -> 900L
+            }
+            bubbleText = when (choice) {
+                PetMood.THINKING -> "嗯…让我想想"
+                PetMood.HAPPY -> "今天也加油～"
+                else -> ""
+            }
+            bubbleUntil = if (bubbleText.isBlank()) 0L else now + 1450L
+            nextIdleActionAt = now + Random.nextLong(4200L, 8200L)
+        }
+    }
 
-        // legs and shoes
-        fill(Color.rgb(255, 222, 205))
-        roundRect(c, 61f, 137f, 76f, 166f, 7f)
-        roundRect(c, 85f, 137f, 100f, 166f, 7f)
-        fill(Color.rgb(100, 81, 123))
-        roundRect(c, 55f, 158f, 79f, 170f, 6f)
-        roundRect(c, 82f, 158f, 106f, 170f, 6f)
+    private fun drawSprite(canvas: Canvas, frame: Int, destination: RectF) {
+        val bitmap = atlas ?: return
+        val safeFrame = frame.coerceIn(0, 14)
+        val source = Rect((safeFrame % 5) * 256, (safeFrame / 5) * 256, (safeFrame % 5 + 1) * 256, (safeFrame / 5 + 1) * 256)
+        canvas.drawBitmap(bitmap, source, destination, spritePaint)
+    }
 
-        // hair behind head
-        fill(Color.rgb(75, 53, 91))
-        val backHair = Path().apply {
-            moveTo(42f, 75f)
-            cubicTo(31f, 42f, 47f, 17f, 79f, 17f)
-            cubicTo(112f, 16f, 129f, 42f, 119f, 77f)
-            lineTo(111f, 105f)
-            lineTo(48f, 105f)
+    private fun drawBubble(canvas: Canvas, rawText: String) {
+        val text = if (rawText.length > 10) rawText.take(9) + "…" else rawText
+        val maxWidth = width - dp(8f)
+        val bubbleWidth = (bubbleTextPaint.measureText(text) + dp(20f)).coerceAtMost(maxWidth)
+        val bubbleHeight = dp(28f)
+        val left = (width - bubbleWidth) / 2f
+        val top = dp(2f)
+        val rect = RectF(left, top, left + bubbleWidth, top + bubbleHeight)
+        canvas.drawRoundRect(rect, dp(12f), dp(12f), bubblePaint)
+        canvas.drawRoundRect(rect, dp(12f), dp(12f), bubbleBorderPaint)
+        val tail = Path().apply {
+            moveTo(width / 2f - dp(4f), top + bubbleHeight - dp(1f))
+            lineTo(width / 2f, top + bubbleHeight + dp(5f))
+            lineTo(width / 2f + dp(4f), top + bubbleHeight - dp(1f))
             close()
         }
-        c.drawPath(backHair, paint)
-        // little side locks
-        c.drawOval(RectF(35f, 58f, 53f, 104f), paint)
-        c.drawOval(RectF(107f, 56f, 125f, 103f), paint)
-
-        // body / sweater
-        fill(Color.rgb(172, 151, 229))
-        roundRect(c, 49f, 103f, 111f, 151f, 18f)
-        // collar
-        fill(Color.rgb(255, 236, 246))
-        val collar = Path().apply {
-            moveTo(67f, 105f); lineTo(80f, 119f); lineTo(94f, 105f)
-            lineTo(89f, 101f); lineTo(80f, 110f); lineTo(72f, 101f); close()
-        }
-        c.drawPath(collar, paint)
-        // sleeves
-        fill(Color.rgb(172, 151, 229))
-        roundRect(c, 42f, 111f, 58f, 137f, 8f)
-        roundRect(c, 102f, 111f, 118f, 137f, 8f)
-        fill(Color.rgb(255, 222, 205))
-        c.drawCircle(50f, 138f, 7f, paint)
-        c.drawCircle(110f, 138f, 7f, paint)
-
-        // face and ears
-        fill(Color.rgb(255, 222, 205))
-        c.drawCircle(48f, 69f, 8f, paint)
-        c.drawCircle(112f, 69f, 8f, paint)
-        c.drawOval(RectF(47f, 35f, 113f, 108f), paint)
-
-        // fringe
-        fill(Color.rgb(75, 53, 91))
-        val fringe = Path().apply {
-            moveTo(44f, 63f)
-            cubicTo(39f, 33f, 56f, 20f, 79f, 21f)
-            cubicTo(103f, 20f, 119f, 38f, 115f, 63f)
-            lineTo(105f, 52f)
-            cubicTo(97f, 62f, 91f, 61f, 82f, 49f)
-            cubicTo(72f, 63f, 62f, 61f, 54f, 52f)
-            close()
-        }
-        c.drawPath(fringe, paint)
-        // hair shine
-        paint.color = Color.rgb(133, 105, 151)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 2.2f
-        c.drawArc(RectF(55f, 28f, 91f, 52f), 205f, 105f, false, paint)
-        paint.style = Paint.Style.FILL
-
-        // eyes
-        fill(Color.rgb(64, 48, 76))
-        c.drawOval(RectF(60f, 66f, 70f, 80f), paint)
-        c.drawOval(RectF(90f, 66f, 100f, 80f), paint)
-        fill(Color.WHITE)
-        c.drawCircle(67f, 69f, 2.5f, paint)
-        c.drawCircle(97f, 69f, 2.5f, paint)
-        // blush
-        fill(Color.rgb(247, 157, 177))
-        paint.alpha = 150
-        c.drawOval(RectF(52f, 82f, 66f, 89f), paint)
-        c.drawOval(RectF(94f, 82f, 108f, 89f), paint)
-        paint.alpha = 255
-        // smile
-        paint.color = Color.rgb(150, 79, 103)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 2.5f
-        paint.strokeCap = Paint.Cap.ROUND
-        c.drawArc(RectF(73f, 79f, 88f, 91f), 15f, 150f, false, paint)
-        paint.style = Paint.Style.FILL
-
-        // tiny hair bow
-        fill(Color.rgb(255, 183, 204))
-        val bowLeft = Path().apply { moveTo(102f, 35f); lineTo(116f, 26f); lineTo(113f, 42f); close() }
-        val bowRight = Path().apply { moveTo(112f, 35f); lineTo(126f, 39f); lineTo(114f, 47f); close() }
-        c.drawPath(bowLeft, paint)
-        c.drawPath(bowRight, paint)
-        fill(Color.rgb(255, 230, 239))
-        c.drawCircle(113f, 37f, 3f, paint)
-
-        // small heart on sweater
-        fill(Color.rgb(255, 230, 239))
-        val heart = Path().apply {
-            moveTo(80f, 132f)
-            cubicTo(70f, 124f, 68f, 136f, 80f, 142f)
-            cubicTo(92f, 136f, 90f, 124f, 80f, 132f)
-        }
-        c.drawPath(heart, paint)
+        canvas.drawPath(tail, bubblePaint)
+        canvas.drawPath(tail, bubbleBorderPaint)
+        val baseline = top + (bubbleHeight - bubbleTextPaint.ascent() - bubbleTextPaint.descent()) / 2f
+        canvas.drawText(text, width / 2f, baseline, bubbleTextPaint)
     }
 
-    private fun fill(color: Int) {
-        paint.color = color
-        paint.alpha = Color.alpha(color)
-        paint.style = Paint.Style.FILL
-        paint.strokeWidth = 1f
+    internal fun showMood(newMood: PetMood, bubble: String, durationMs: Long) {
+        if (sleeping && newMood != PetMood.HAPPY && newMood != PetMood.SURPRISED) return
+        mood = newMood
+        moodUntil = SystemClock.uptimeMillis() + durationMs.coerceAtLeast(250L)
+        bubbleText = bubble
+        bubbleUntil = if (bubble.isBlank()) 0L else SystemClock.uptimeMillis() + durationMs.coerceAtLeast(700L)
+        nextIdleActionAt = moodUntil + Random.nextLong(1800L, 4200L)
+        invalidate()
     }
 
-    private fun roundRect(c: Canvas, left: Float, top: Float, right: Float, bottom: Float, radius: Float) {
-        c.drawRoundRect(RectF(left, top, right, bottom), radius, radius, paint)
+    internal fun reactToTap() {
+        if (sleeping) {
+            toggleSleep()
+            return
+        }
+        val reaction = listOf(
+            PetMood.HAPPY to "嘿嘿！",
+            PetMood.SHY to "被你发现啦～",
+            PetMood.SURPRISED to "欸？你戳我啦！",
+            PetMood.BLINK to "眨眨眼～"
+        ).random()
+        showMood(reaction.first, reaction.second, 1700L)
+    }
+
+    internal fun playDemoSequence(): Boolean {
+        if (sleeping) toggleSleep()
+        demoRunning = true
+        demoIndex = 0
+        demoHandler.removeCallbacks(demoRunnable)
+        demoHandler.post(demoRunnable)
+        return true
+    }
+
+    internal fun toggleSleep(): Boolean {
+        sleeping = !sleeping
+        val now = SystemClock.uptimeMillis()
+        if (sleeping) {
+            mood = PetMood.SLEEP
+            moodUntil = 0L
+            bubbleText = "Zzz…"
+            bubbleUntil = now + 2400L
+        } else {
+            mood = PetMood.HAPPY
+            moodUntil = now + 1800L
+            bubbleText = "我醒啦～"
+            bubbleUntil = now + 2100L
+            nextIdleActionAt = now + 4000L
+        }
+        invalidate()
+        return sleeping
     }
 
     override fun performClick(): Boolean {
         super.performClick()
+        reactToTap()
         return true
     }
+
+    private fun dp(value: Float): Float = value * resources.displayMetrics.density
 }
