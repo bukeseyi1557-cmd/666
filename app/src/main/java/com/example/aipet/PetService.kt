@@ -1,27 +1,37 @@
 package com.example.aipet
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.app.*
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.provider.Settings
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.WindowManager
-import android.widget.Toast
+import android.text.TextUtils
+import android.view.*
+import android.view.inputmethod.InputMethodManager
+import android.widget.*
+import org.json.JSONObject
 import kotlin.math.abs
 
 class PetService : Service() {
     private lateinit var windowManager: WindowManager
     private var petView: PetView? = null
-    private var layoutParams: WindowManager.LayoutParams? = null
+    private var petParams: WindowManager.LayoutParams? = null
+    private var chatView: View? = null
+    private var chatParams: WindowManager.LayoutParams? = null
+    private var menuView: View? = null
+    private var menuParams: WindowManager.LayoutParams? = null
+
+    private var desktopMode = PetChatEngine.Mode.LOCAL
+    private val conversationHistory = mutableListOf<JSONObject>()
+    private var desktopMessagesColumn: LinearLayout? = null
+    private var desktopChatScroll: ScrollView? = null
+    private var desktopModeLabel: TextView? = null
+
     private var initialX = 0
     private var initialY = 0
     private var touchX = 0f
@@ -60,81 +70,384 @@ class PetService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
         val params = WindowManager.LayoutParams(
-            dp(148),
-            dp(194),
+            dp(182),
+            dp(228),
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = dp(12)
             y = dp(180)
         }
-        view.setOnTouchListener { v, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    touchX = event.rawX
-                    touchY = event.rawY
-                    downAt = SystemClock.uptimeMillis()
-                    dragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - touchX).toInt()
-                    val dy = (event.rawY - touchY).toInt()
-                    if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
-                        dragging = true
-                        PetAnimator.react(PetMood.WALK, "", 900L)
-                    }
-                    if (dragging) {
-                        params.x = initialX + dx
-                        params.y = initialY + dy
-                        try { windowManager.updateViewLayout(v, params) } catch (_: Exception) { }
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!dragging) {
-                        val now = SystemClock.uptimeMillis()
-                        val heldMs = now - downAt
-                        when {
-                            heldMs >= 650L -> {
-                                val sleeping = PetAnimator.toggleSleep()
-                                Toast.makeText(
-                                    this,
-                                    if (sleeping == true) "小伙伴进入休息模式啦，轻点或长按可以唤醒" else "小伙伴醒来啦！",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                lastTapAt = 0L
-                            }
-                            lastTapAt > 0L && now - lastTapAt <= 360L -> {
-                                lastTapAt = 0L
-                                PetAnimator.react(PetMood.HAPPY, "来聊天吧～", 1400L)
-                                openChat()
-                            }
-                            else -> {
-                                lastTapAt = now
-                                v.performClick()
-                            }
-                        }
-                    }
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> true
-                else -> false
-            }
-        }
+        view.setOnTouchListener { v, event -> handlePetTouch(v, event, params) }
         try {
             windowManager.addView(view, params)
             petView = view
-            layoutParams = params
+            petParams = params
+            PetAnimator.react(PetMood.HAPPY, "你好呀～", 1500L)
         } catch (e: Exception) {
             Toast.makeText(this, "桌宠显示失败：${e.localizedMessage ?: "未知错误"}", Toast.LENGTH_LONG).show()
             stopSelf()
         }
+    }
+
+    private fun handlePetTouch(v: View, event: MotionEvent, params: WindowManager.LayoutParams): Boolean {
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                initialX = params.x
+                initialY = params.y
+                touchX = event.rawX
+                touchY = event.rawY
+                downAt = SystemClock.uptimeMillis()
+                dragging = false
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = (event.rawX - touchX).toInt()
+                val dy = (event.rawY - touchY).toInt()
+                if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                    dragging = true
+                    PetAnimator.react(PetMood.WALK, "移动中～", 800L)
+                    hideMenuWindow()
+                }
+                if (dragging) {
+                    params.x = initialX + dx
+                    params.y = initialY + dy
+                    try { windowManager.updateViewLayout(v, params) } catch (_: Exception) { }
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (dragging) {
+                    snapPetToEdge(params)
+                    return true
+                }
+                val now = SystemClock.uptimeMillis()
+                val heldMs = now - downAt
+                when {
+                    heldMs >= 650L -> {
+                        toggleMenuWindow()
+                        lastTapAt = 0L
+                    }
+                    lastTapAt > 0L && now - lastTapAt <= 360L -> {
+                        lastTapAt = 0L
+                        toggleDesktopChat()
+                    }
+                    else -> {
+                        lastTapAt = now
+                        PetAnimator.reactToTap()
+                        v.performClick()
+                    }
+                }
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> return true
+        }
+        return false
+    }
+
+    private fun snapPetToEdge(params: WindowManager.LayoutParams) {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val targetX = if (params.x + dp(91) < screenWidth / 2) dp(6) else screenWidth - params.width - dp(6)
+        params.x = targetX
+        try { petView?.let { windowManager.updateViewLayout(it, params) } } catch (_: Exception) { }
+        PetAnimator.react(PetMood.HAPPY, "贴边站好～", 900L)
+    }
+
+    private fun toggleDesktopChat() {
+        if (chatView == null) showDesktopChat() else hideDesktopChat()
+    }
+
+    private fun showDesktopChat() {
+        if (chatView != null) return
+        hideMenuWindow()
+        @Suppress("DEPRECATION")
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = roundedBackground(Color.WHITE, stroke = Color.rgb(210, 224, 255))
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "桌面对话"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(66, 72, 108))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        desktopModeLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(98, 104, 140))
+        }
+        header.addView(desktopModeLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        header.addView(Button(this).apply {
+            text = "×"
+            isAllCaps = false
+            setOnClickListener { hideDesktopChat() }
+            minWidth = 0
+            minimumWidth = 0
+        }, LinearLayout.LayoutParams(dp(42), dp(36)))
+        root.addView(header, matchWrap())
+
+        val suggestionRow = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            val chipContainer = LinearLayout(this@PetService).apply { orientation = LinearLayout.HORIZONTAL }
+            PetChatEngine.suggestions().forEach { suggestion ->
+                chipContainer.addView(makeChip(suggestion) { sendDesktopMessage(suggestion) })
+            }
+            addView(chipContainer)
+        }
+        root.addView(suggestionRow, matchWrap(marginTop = 6))
+
+        desktopChatScroll = ScrollView(this).apply {
+            isFillViewport = true
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        desktopMessagesColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        desktopChatScroll?.addView(desktopMessagesColumn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(desktopChatScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val input = EditText(this).apply {
+            hint = "在桌面直接和她说话…"
+            setTextColor(Color.rgb(56, 60, 82))
+            textSize = 15f
+            maxLines = 3
+            minHeight = dp(44)
+        }
+        composer.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        composer.addView(Button(this).apply {
+            text = "发送"
+            isAllCaps = false
+            setOnClickListener {
+                val text = input.text.toString().trim()
+                if (text.isNotEmpty()) {
+                    input.setText("")
+                    sendDesktopMessage(text)
+                }
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(46)))
+        root.addView(composer, matchWrap())
+
+        val footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        footer.addView(Button(this).apply {
+            text = "本地/AI"
+            isAllCaps = false
+            setOnClickListener { toggleDesktopMode() }
+        }, LinearLayout.LayoutParams(0, dp(40), 1f))
+        footer.addView(Button(this).apply {
+            text = "完整聊天"
+            isAllCaps = false
+            setOnClickListener { openChat() }
+        }, LinearLayout.LayoutParams(0, dp(40), 1f))
+        footer.addView(Button(this).apply {
+            text = "动作"
+            isAllCaps = false
+            setOnClickListener { PetAnimator.playDemoSequence() }
+        }, LinearLayout.LayoutParams(0, dp(40), 1f))
+        root.addView(footer, matchWrap(marginTop = 8))
+
+        val params = WindowManager.LayoutParams(
+            dp(320),
+            dp(390),
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = petParams?.x?.plus(dp(70)) ?: dp(88)
+            y = petParams?.y?.minus(dp(20)) ?: dp(120)
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+
+        try {
+            windowManager.addView(root, params)
+            chatView = root
+            chatParams = params
+            addDesktopMessage("小伙伴", "欢迎来到桌面对话模式！你可以直接在桌面和我聊天啦。", false)
+            refreshDesktopModeLabel()
+            PetAnimator.react(PetMood.HAPPY, "一起聊天吧～", 1600L)
+            input.requestFocus()
+            showKeyboard(input)
+        } catch (e: Exception) {
+            Toast.makeText(this, "打开桌面对话失败：${e.localizedMessage ?: "未知错误"}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun sendDesktopMessage(text: String) {
+        addDesktopMessage("你", text, true)
+        conversationHistory.add(JSONObject().put("role", "user").put("content", text))
+        PetAnimator.reactToText(text)
+        addDesktopMessage("小伙伴", "正在思考…", false, typing = true)
+        PetChatEngine.requestReply(this, text, desktopMode, conversationHistory.takeLast(10)) { result ->
+            removeLastTypingIndicator()
+            val reply = result.reply
+            addDesktopMessage("小伙伴", reply, false)
+            if (result.ok) conversationHistory.add(JSONObject().put("role", "assistant").put("content", reply))
+            PetAnimator.reactToText(reply, isReply = true)
+            if (!result.ok && desktopMode == PetChatEngine.Mode.API) {
+                desktopMode = PetChatEngine.Mode.LOCAL
+                refreshDesktopModeLabel()
+            }
+        }
+    }
+
+    private fun removeLastTypingIndicator() {
+        val column = desktopMessagesColumn ?: return
+        if (column.childCount <= 0) return
+        val last = column.getChildAt(column.childCount - 1)
+        if (last.tag == "typing") column.removeView(last)
+    }
+
+    private fun addDesktopMessage(name: String, text: String, fromUser: Boolean, typing: Boolean = false) {
+        val column = desktopMessagesColumn ?: return
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = if (fromUser) Gravity.END else Gravity.START
+            tag = if (typing) "typing" else null
+        }
+        val label = TextView(this).apply {
+            this.text = name
+            textSize = 11f
+            setTextColor(Color.rgb(129, 135, 168))
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+        }
+        val bubble = TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(if (fromUser) Color.WHITE else Color.rgb(67, 73, 107))
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = roundedBackground(
+                if (fromUser) Color.rgb(108, 157, 255) else Color.rgb(244, 247, 255),
+                if (fromUser) Color.rgb(108, 157, 255) else Color.rgb(222, 231, 255)
+            )
+            maxWidth = dp(220)
+        }
+        wrapper.addView(label)
+        wrapper.addView(bubble)
+        column.addView(wrapper, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(8)
+        })
+        desktopChatScroll?.post { desktopChatScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun toggleDesktopMode() {
+        if (desktopMode == PetChatEngine.Mode.LOCAL) {
+            if (ApiKeyStore.load(this).isNullOrBlank()) {
+                Toast.makeText(this, "还没配置独立 AI，先打开完整聊天页完成设置。", Toast.LENGTH_LONG).show()
+                openChat()
+                return
+            }
+            desktopMode = PetChatEngine.Mode.API
+        } else {
+            desktopMode = PetChatEngine.Mode.LOCAL
+        }
+        refreshDesktopModeLabel()
+        PetAnimator.react(PetMood.HAPPY, if (desktopMode == PetChatEngine.Mode.LOCAL) "切回本地模式" else "切到 AI 模式", 1400L)
+    }
+
+    private fun refreshDesktopModeLabel() {
+        desktopModeLabel?.text = if (desktopMode == PetChatEngine.Mode.LOCAL) "本地" else "AI"
+    }
+
+    private fun hideDesktopChat() {
+        chatView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        chatView = null
+        chatParams = null
+        desktopMessagesColumn = null
+        desktopChatScroll = null
+        desktopModeLabel = null
+    }
+
+    private fun toggleMenuWindow() {
+        if (menuView == null) showMenuWindow() else hideMenuWindow()
+    }
+
+    private fun showMenuWindow() {
+        if (menuView != null) return
+        @Suppress("DEPRECATION")
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = roundedBackground(Color.WHITE, Color.rgb(213, 226, 255))
+        }
+        root.addView(TextView(this).apply {
+            text = "小伙伴菜单"
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(66, 72, 108))
+        }, matchWrap())
+        root.addView(TextView(this).apply {
+            text = "双击桌宠可直接聊天，长按再次打开/关闭这个菜单。"
+            textSize = 12f
+            setTextColor(Color.rgb(117, 124, 153))
+            setPadding(0, dp(4), 0, dp(8))
+        }, matchWrap())
+
+        root.addView(makeMenuButton("桌面对话") { toggleDesktopChat(); hideMenuWindow() })
+        root.addView(makeMenuButton("完整聊天与 AI 设置") { openChat(); hideMenuWindow() })
+        root.addView(makeMenuButton("15 种动作演示") { PetAnimator.playDemoSequence(); hideMenuWindow() })
+        root.addView(makeMenuButton("休息 / 唤醒") {
+            PetAnimator.toggleSleep(); hideMenuWindow()
+        })
+        root.addView(makeMenuButton("隐藏桌宠") {
+            hideDesktopChat(); hideMenuWindow(); stopSelf()
+        })
+        root.addView(makeMenuButton(if (desktopMode == PetChatEngine.Mode.LOCAL) "切换为 AI 模式" else "切换为本地模式") {
+            toggleDesktopMode(); hideMenuWindow()
+        })
+
+        val params = WindowManager.LayoutParams(
+            dp(220),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (petParams?.x ?: dp(24)) + dp(72)
+            y = (petParams?.y ?: dp(160)) + dp(10)
+        }
+        try {
+            windowManager.addView(root, params)
+            menuView = root
+            menuParams = params
+        } catch (e: Exception) {
+            Toast.makeText(this, "打开菜单失败：${e.localizedMessage ?: "未知错误"}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun hideMenuWindow() {
+        menuView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        menuView = null
+        menuParams = null
     }
 
     private fun openChat() {
@@ -144,6 +457,45 @@ class PetService : Service() {
         startActivity(intent)
     }
 
+    private fun showKeyboard(view: View) {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun roundedBackground(fill: Int, stroke: Int): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(16).toFloat()
+        setColor(fill)
+        setStroke(dp(1), stroke)
+    }
+
+    private fun makeChip(text: String, action: () -> Unit): TextView = TextView(this).apply {
+        this.text = text
+        ellipsize = TextUtils.TruncateAt.END
+        setSingleLine()
+        setTextColor(Color.rgb(72, 79, 117))
+        textSize = 13f
+        setPadding(dp(12), dp(6), dp(12), dp(6))
+        background = roundedBackground(Color.rgb(244, 247, 255), Color.rgb(221, 230, 255))
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            rightMargin = dp(8)
+        }
+    }
+
+    private fun makeMenuButton(label: String, action: () -> Unit): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+            bottomMargin = dp(8)
+        }
+    }
+
+    private fun matchWrap(marginTop: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(marginTop)
+        }
+
     private fun buildNotification(): Notification {
         val openIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -152,7 +504,7 @@ class PetService : Service() {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, "pet_service")
                 .setContentTitle("小伙伴桌宠正在运行")
-                .setContentText("点击此通知管理桌宠")
+                .setContentText("单击互动，双击桌面对话，长按打开菜单")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(openIntent)
                 .setOngoing(true)
@@ -160,7 +512,7 @@ class PetService : Service() {
         } else {
             Notification.Builder(this)
                 .setContentTitle("小伙伴桌宠正在运行")
-                .setContentText("点击此通知管理桌宠")
+                .setContentText("单击互动，双击桌面对话，长按打开菜单")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(openIntent)
                 .setOngoing(true)
@@ -180,6 +532,8 @@ class PetService : Service() {
     }
 
     override fun onDestroy() {
+        hideDesktopChat()
+        hideMenuWindow()
         petView?.let { view ->
             try { windowManager.removeView(view) } catch (_: Exception) { }
         }

@@ -4,42 +4,30 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import android.widget.Toast
-import org.json.JSONArray
+import android.widget.*
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.concurrent.Executors
 
 class ChatActivity : Activity() {
     private lateinit var messageColumn: LinearLayout
     private lateinit var scrollView: ScrollView
     private lateinit var input: EditText
     private lateinit var modeLabel: TextView
-    private var mode = Mode.LOCAL
+    private var mode = PetChatEngine.Mode.LOCAL
     private var openedSettingsForApi = false
-    private val executor = Executors.newSingleThreadExecutor()
     private val history = mutableListOf<JSONObject>()
-
-    private enum class Mode { LOCAL, API }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildScreen()
-        addMessage("小伙伴", "嗨！我住在你的手机桌面上。你可以拖动我，也可以在这里跟我说说话。现在是免费本地模式，不会把聊天发送到网络。", false)
-        PetAnimator.react(PetMood.HAPPY, "你来啦～", 1300L)
+        addMessage("小伙伴", "欢迎回来～现在支持更丰富的互动了：单击表情互动、双击桌面对话、长按桌宠打开菜单。你也可以在这里进行完整聊天和 AI 设置。", false)
+        PetAnimator.react(PetMood.HAPPY, "欢迎回来～", 1300L)
     }
 
     override fun onResume() {
@@ -47,7 +35,7 @@ class ChatActivity : Activity() {
         if (openedSettingsForApi) {
             openedSettingsForApi = false
             if (!ApiKeyStore.load(this).isNullOrBlank()) {
-                mode = Mode.API
+                mode = PetChatEngine.Mode.API
                 updateModeLabel()
                 Toast.makeText(this, "已切换到独立 AI 模式", Toast.LENGTH_SHORT).show()
             }
@@ -88,7 +76,7 @@ class ChatActivity : Activity() {
         modeRow.addView(Button(this).apply {
             text = "免费本地"
             isAllCaps = false
-            setOnClickListener { mode = Mode.LOCAL; updateModeLabel() }
+            setOnClickListener { mode = PetChatEngine.Mode.LOCAL; updateModeLabel() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         modeRow.addView(Button(this).apply {
             text = "ChatGPT 网页"
@@ -102,6 +90,26 @@ class ChatActivity : Activity() {
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         root.addView(modeRow, matchWrap())
 
+        val tips = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            val tipsContainer = LinearLayout(this@ChatActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            PetChatEngine.suggestions().forEach { suggestion ->
+                tipsContainer.addView(TextView(this@ChatActivity).apply {
+                    text = suggestion
+                    textSize = 13f
+                    setTextColor(Color.rgb(72, 79, 117))
+                    setPadding(dp(12), dp(6), dp(12), dp(6))
+                    background = chipBackground()
+                    setOnClickListener { input.setText(suggestion); input.setSelection(input.text.length) }
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = dp(8)
+                    }
+                })
+            }
+            addView(tipsContainer)
+        }
+        root.addView(tips, matchWrap())
+
         scrollView = ScrollView(this).apply {
             isFillViewport = true
             clipToPadding = false
@@ -111,7 +119,7 @@ class ChatActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(2), dp(2), dp(2), dp(10))
         }
-        scrollView.addView(messageColumn, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        scrollView.addView(messageColumn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val composer = LinearLayout(this).apply {
@@ -119,10 +127,11 @@ class ChatActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         input = EditText(this).apply {
-            hint = "试试说：害羞、跳一下、吃东西、晚安…"
+            hint = "试试说：夸夸我、安慰我、跳一下、晚安…"
             textSize = 15f
             minHeight = dp(48)
             maxLines = 4
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             imeOptions = EditorInfo.IME_ACTION_SEND
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEND) { sendMessage(); true } else false
@@ -141,8 +150,8 @@ class ChatActivity : Activity() {
     }
 
     private fun updateModeLabel() {
-        modeLabel.text = if (mode == Mode.LOCAL) {
-            "当前模式：免费本地陪聊（固定规则回复，不调用 AI）"
+        modeLabel.text = if (mode == PetChatEngine.Mode.LOCAL) {
+            "当前模式：免费本地陪聊（固定规则回复，不调用网络）"
         } else {
             "当前模式：独立 AI 接口（消息将发送给你配置的服务商）"
         }
@@ -162,7 +171,7 @@ class ChatActivity : Activity() {
             startActivity(Intent(this, AiSettingsActivity::class.java))
             Toast.makeText(this, "先配置接口地址、模型和 API Key", Toast.LENGTH_LONG).show()
         } else {
-            mode = Mode.API
+            mode = PetChatEngine.Mode.API
             updateModeLabel()
         }
     }
@@ -177,111 +186,69 @@ class ChatActivity : Activity() {
         if (text.isEmpty()) return
         input.setText("")
         addMessage("你", text, true)
+        history.add(JSONObject().put("role", "user").put("content", text))
         PetAnimator.reactToText(text)
-        if (mode == Mode.LOCAL) {
-            val reply = localReply(text)
-            addMessage("小伙伴", reply, false)
-            PetAnimator.reactToText(reply, isReply = true)
-        } else {
-            sendToApi(text)
-        }
-    }
-
-    private fun localReply(text: String): String {
-        val s = text.lowercase()
-        return when {
-            listOf("你好", "嗨", "哈喽", "hello", "hi").any { s.contains(it) } -> "嗨嗨！今天也辛苦啦。想聊点什么都可以，我在这里陪你一会儿。"
-            listOf("难过", "伤心", "烦", "压力", "累", "孤独", "不开心").any { s.contains(it) } -> "听起来你现在不太轻松。你不用急着把事情想明白，也不用马上振作起来。要不要先从最让你在意的那一点说起？"
-            listOf("开心", "高兴", "好消息", "成功").any { s.contains(it) } -> "这听起来是件值得开心的事！虽然我现在只是基础版小伙伴，但我愿意认真听你分享。"
-            listOf("睡觉", "晚安", "困").any { s.contains(it) } -> "那就别太勉强自己啦。希望你今晚能休息好，晚安！"
-            listOf("你是谁", "介绍一下", "你叫什么").any { s.contains(it) } -> "我是住在你手机桌面上的小伙伴。现在我用的是免费本地回复，还没有真正的 AI 思考能力；配置独立 AI 接口后，就能进行更自然的对话。"
-            text.endsWith("？") || text.endsWith("?") -> "我现在的免费模式还比较简单，没办法真正理解所有问题。你可以切换到独立 AI 模式，或者先换个方式告诉我你最想解决的部分。"
-            else -> "我看到你说：“$text”。免费本地模式还不会像真正的 AI 那样深入理解，不过我在听。你愿意再多告诉我一点吗？"
-        }
-    }
-
-    private fun sendToApi(userText: String) {
-        val prefs = getSharedPreferences("ai_settings", MODE_PRIVATE)
-        val endpoint = prefs.getString("endpoint", AiSettingsActivity.DEFAULT_ENDPOINT) ?: AiSettingsActivity.DEFAULT_ENDPOINT
-        val model = prefs.getString("model", AiSettingsActivity.DEFAULT_MODEL) ?: AiSettingsActivity.DEFAULT_MODEL
-        val apiKey = ApiKeyStore.load(this)
-        if (apiKey.isNullOrBlank()) {
-            addMessage("小伙伴", "还没有配置 API Key。请点击“AI 设置”添加接口信息。", false)
-            mode = Mode.LOCAL
-            updateModeLabel()
-            return
-        }
-
-        history.add(JSONObject().put("role", "user").put("content", userText))
-        addMessage("小伙伴", "正在思考…", false)
-        PetAnimator.react(PetMood.THINKING, "让我想想…", 2200L)
-        val systemPrompt = JSONObject()
-            .put("role", "system")
-            .put("content", "你是一个温柔、自然、不过度打扰用户的二次元桌面宠物。请用简体中文回复，语气友善、简洁。不要声称自己有真实情感或能在后台主动观察用户。")
-        val messages = JSONArray().put(systemPrompt)
-        history.takeLast(12).forEach { messages.put(it) }
-        val body = JSONObject()
-            .put("model", model)
-            .put("messages", messages)
-            .put("temperature", 0.7)
-
-        executor.execute {
-            var reply = "这次没有成功连接到 AI 服务，请检查网络、接口地址、模型名称和 API Key。"
-            try {
-                val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000
-                    readTimeout = 60000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    setRequestProperty("Authorization", "Bearer $apiKey")
-                }
-                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                val status = connection.responseCode
-                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-                if (status !in 200..299) {
-                    val detail = try { JSONObject(responseText).optString("error", responseText) } catch (_: Exception) { responseText }
-                    reply = "AI 服务返回 HTTP $status：${detail.take(240)}"
-                } else {
-                    val json = JSONObject(responseText)
-                    reply = json.getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").optString("content", "（服务没有返回文字）")
-                    history.add(JSONObject().put("role", "assistant").put("content", reply))
-                }
-                connection.disconnect()
-            } catch (e: Exception) {
-                reply = "连接失败：${e.localizedMessage ?: "请检查网络与接口配置"}"
+        addMessage("小伙伴", "正在思考…", false, typing = true)
+        PetChatEngine.requestReply(this, text, mode, history.takeLast(10)) { result ->
+            removeLastTypingIndicator()
+            addMessage("小伙伴", result.reply, false)
+            if (result.ok) history.add(JSONObject().put("role", "assistant").put("content", result.reply))
+            if (!result.ok && mode == PetChatEngine.Mode.API) {
+                mode = PetChatEngine.Mode.LOCAL
+                updateModeLabel()
             }
-            runOnUiThread {
-                addMessage("小伙伴", reply, false)
-                PetAnimator.reactToText(reply, isReply = true)
-            }
+            PetAnimator.reactToText(result.reply, isReply = true)
         }
     }
 
-    private fun addMessage(sender: String, message: String, fromUser: Boolean) {
+    private fun removeLastTypingIndicator() {
+        if (messageColumn.childCount <= 0) return
+        val last = messageColumn.getChildAt(messageColumn.childCount - 1)
+        if (last.tag == "typing") messageColumn.removeView(last)
+    }
+
+    private fun addMessage(name: String, text: String, fromUser: Boolean, typing: Boolean = false) {
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = if (fromUser) Gravity.END else Gravity.START
+            tag = if (typing) "typing" else null
+        }
+        val label = TextView(this).apply {
+            this.text = name
+            textSize = 11f
+            setTextColor(Color.rgb(129, 135, 168))
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+        }
         val bubble = TextView(this).apply {
-            text = "$sender\n$message"
+            this.text = text
             textSize = 15f
-            setTextColor(if (fromUser) Color.rgb(255, 255, 255) else Color.rgb(69, 55, 82))
-            setPadding(dp(13), dp(10), dp(13), dp(10))
-            background = GradientDrawable().apply {
-                setColor(if (fromUser) Color.rgb(139, 116, 206) else Color.rgb(244, 237, 250))
-                cornerRadius = dp(16).toFloat()
+            setTextColor(if (fromUser) Color.WHITE else Color.rgb(67, 73, 107))
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = if (fromUser) {
+                bubbleBackground(Color.rgb(108, 157, 255), Color.rgb(108, 157, 255))
+            } else {
+                bubbleBackground(Color.rgb(244, 247, 255), Color.rgb(222, 231, 255))
             }
-            maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
+            maxWidth = dp(260)
         }
-        val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        params.gravity = if (fromUser) Gravity.END else Gravity.START
-        params.bottomMargin = dp(9)
-        messageColumn.addView(bubble, params)
+        wrapper.addView(label)
+        wrapper.addView(bubble)
+        messageColumn.addView(wrapper, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(8)
+        })
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
 
-    override fun onDestroy() {
-        executor.shutdownNow()
-        super.onDestroy()
+    private fun bubbleBackground(fill: Int, stroke: Int) = android.graphics.drawable.GradientDrawable().apply {
+        cornerRadius = dp(16).toFloat()
+        setColor(fill)
+        setStroke(dp(1), stroke)
+    }
+
+    private fun chipBackground() = android.graphics.drawable.GradientDrawable().apply {
+        cornerRadius = dp(18).toFloat()
+        setColor(Color.rgb(244, 247, 255))
+        setStroke(dp(1), Color.rgb(221, 230, 255))
     }
 
     private fun matchWrap() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
